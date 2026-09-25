@@ -1,0 +1,46 @@
+# Use Python 3.12 slim image
+FROM python:3.12-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    nmap \
+    libcap2-bin \
+    dnsutils \
+    whois \
+    curl \
+    wget \
+    && setcap cap_net_raw+ep /usr/bin/nmap \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy backend requirements and install Python dependencies
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY backend/ .
+
+# Create reports directory
+RUN mkdir -p /app/reports
+
+# Expose port
+EXPOSE 5000
+
+# Set environment variables
+ENV FLASK_APP=app.py
+ENV FLASK_ENV=production
+ENV PYTHONPATH=/app
+
+# Create non-root user
+RUN useradd -m -u 1000 scanner && chown -R scanner:scanner /app
+USER scanner
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:5000/api/health || exit 1
+
+# Run a production WSGI server with a threaded worker compatible with Socket.IO.
+# /dev/shm keeps gunicorn's heartbeat file on tmpfs (see gunicorn 22 notes).
+CMD ["gunicorn", "--worker-class", "gthread", "--workers", "1", "--threads", "100", "--worker-tmp-dir", "/dev/shm", "--bind", "0.0.0.0:5000", "app:app"]

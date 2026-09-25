@@ -1,0 +1,171 @@
+import axios from 'axios';
+
+const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+const ACCESS_TOKEN_STORAGE_KEY = 'cybersentry-auth-token';
+
+export const getApiAccessToken = () =>
+  localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY) || sessionStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+
+export const setApiAccessToken = (token, persistent = true) => {
+  if (token) {
+    if (persistent) {
+      localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
+      sessionStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
+      localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    }
+  } else {
+    localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    sessionStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+  }
+};
+
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 60000, // default for quick endpoints
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Scan requests can legitimately run for minutes (nmap with service
+// detection); align with the gateway (nginx proxy_read_timeout) and the CLI
+// (300 s) so the UI does not abort while the backend is still scanning.
+const SCAN_TIMEOUT_MS = 300000;
+
+const scanRequest = (method, url, data) =>
+  apiClient.request({ method, url, data, timeout: SCAN_TIMEOUT_MS });
+
+// Request interceptor for auth
+apiClient.interceptors.request.use(
+  (config) => {
+    const token = getApiAccessToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Response interceptor for error handling
+apiClient.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    // If unauthorized and on a protected API route (excluding auth signin/signup)
+    const isAuthEndpoint = error.config?.url?.includes('/auth/signin') || error.config?.url?.includes('/auth/signup');
+    if (error.response?.status === 401 && !isAuthEndpoint) {
+      setApiAccessToken(null);
+    }
+    return Promise.reject(error.response?.data || error.message);
+  }
+);
+
+const apiService = {
+  // Authentication endpoints
+  authSignup: (userData) => apiClient.post('/auth/signup', userData),
+  authSignin: (credentials) => apiClient.post('/auth/signin', credentials),
+  authGetMe: () => apiClient.get('/auth/me'),
+  authLogout: () => apiClient.post('/auth/logout'),
+
+  // Health check
+  healthCheck: () => apiClient.get('/health'),
+
+  // Unified all-in-one security assessment endpoint
+  scanUnified: (target, options = {}) =>
+    scanRequest('post', '/scan', { target, ...options }),
+
+
+  // Reconnaissance endpoints
+  scanSubdomains: (domain) => scanRequest('post', '/scan/subdomain', { domain }),
+
+  scanPorts: (target, portRange = '1-1000') =>
+    scanRequest('post', '/scan/ports', { target, port_range: portRange }),
+
+  whoisLookup: (domain) => scanRequest('post', '/scan/whois', { domain }),
+
+  dnsEnumeration: (domain) => scanRequest('post', '/scan/dns', { domain }),
+
+  // Vulnerability scanning
+  scanVulnerabilities: (target, scanType = 'basic') =>
+    scanRequest('post', '/vulnerability/scan', { target, scan_type: scanType }),
+
+  // AI Assistant
+  chatWithAI: (message, context = {}) =>
+    apiClient.post('/ai/chat', { message, context }),
+
+  // Report generation
+  generateReport: (scanData, format = 'html') =>
+    apiClient.post('/report/generate', { scan_data: scanData, format }),
+
+  downloadReport: (reportPath) => {
+    const filename = String(reportPath).split('/').pop();
+    return apiClient.get(`/report/download/${encodeURIComponent(filename)}`, {
+      responseType: 'blob',
+    });
+  },
+
+  // Mock endpoints for scan history (would be real database calls)
+  getScanHistory: async () => {
+    // This would be a real API call in production
+    const stored = localStorage.getItem('scanHistory');
+    return stored ? JSON.parse(stored) : [];
+  },
+
+  saveScanResult: async (scanResult) => {
+    // This would be a real API call in production
+    const history = await apiService.getScanHistory();
+    const updated = [scanResult, ...history.slice(0, 49)]; // Keep last 50
+    localStorage.setItem('scanHistory', JSON.stringify(updated));
+    return scanResult;
+  },
+
+  // User management (placeholder)
+  getCurrentUser: () => {
+    return {
+      id: 1,
+      username: 'demo_user',
+      email: 'demo@network-scanner.local',
+      role: 'user',
+      learning_mode: true
+    };
+  },
+
+  updateUserSettings: (settings) => {
+    if (Object.prototype.hasOwnProperty.call(settings, 'api_access_token')) {
+      setApiAccessToken(settings.api_access_token);
+    }
+    // User preferences remain local until server-side accounts are implemented.
+    return Promise.resolve({ ...settings, api_access_token: undefined });
+  },
+
+  // Project management (placeholder)
+  getProjects: () => {
+    const stored = localStorage.getItem('projects');
+    return Promise.resolve(stored ? JSON.parse(stored) : []);
+  },
+
+  createProject: (project) => {
+    const projects = JSON.parse(localStorage.getItem('projects') || '[]');
+    const newProject = {
+      ...project,
+      id: Date.now(),
+      created_at: new Date().toISOString(),
+      scan_count: 0,
+      status: 'active'
+    };
+    projects.push(newProject);
+    localStorage.setItem('projects', JSON.stringify(projects));
+    return Promise.resolve(newProject);
+  },
+
+  // Aggregate statistics are not persisted by the backend yet. Returning no
+  // remote metrics lets the dashboard derive honest local scan totals instead
+  // of presenting demo values as production data.
+  getStatistics: () => Promise.resolve(null)
+};
+
+export default apiService;
